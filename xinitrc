@@ -1,0 +1,1 @@
+xterm & exec bin/pwm
