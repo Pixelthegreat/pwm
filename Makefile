@@ -21,4 +21,4 @@ clean:
 
 # test run #
 testrun:
-	sudo xinit ./xinitrc -- "/usr/bin/Xephyr" :100 -ac -screen 640x480 -host-cursor
+	xinit ./xinitrc -- "/usr/bin/Xephyr" :100 -ac -screen 800x600 -host-cursor

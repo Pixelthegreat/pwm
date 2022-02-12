@@ -2,11 +2,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include "wm.h"
 
 /* literally just two windows */
 struct windows {
 	Window w, f;
+	//GC fgc;
+	//Display *d;
 };
 
 /* variables and forw-decls */
@@ -17,23 +20,44 @@ static void _wmConfigureRequest(wm *, XConfigureRequestEvent *);
 static void _wmMapRequest(wm *, XMapRequestEvent *);
 static void _wmUnmapNotify(wm *, XUnmapEvent *);
 static void _wmFrame(wm *, Window, int);
+static void _wmCloseWindow(wm *, Window);
 static int _wm_detected = 0;
+static int _b1_pressed = 0;
 
-struct windows *ws = NULL;
-int wsl = 0;
-int wsc = 8;
+static struct windows *ws = NULL;
+static int wsl = 0;
+static int wsc = 8;
+
+static int mouse_x;
+static int mouse_y;
+
+static GC mgc;
+static Display *_mdisp;
+
+static Atom _wm_delete_message;
+static Atom _wm_protocols;
 
 /* free ws list */
 static void wsfree() {
+
+	if (ws == NULL)
+		return;
+	
+	/* free gc's */
+	if (mgc != NULL) XFreeGC(_mdisp, mgc);
 	
 	/* free list */
 	free(ws);
+	ws = NULL;
 }
 
 /* intialise window manager */
 extern void wmInit(wm *w) {
 
+	XInitThreads();
+
 	w->disp = XOpenDisplay(NULL);
+	_mdisp = w->disp;
 	
 	/* could not open X display */
 	if (w->disp == NULL) {
@@ -45,6 +69,10 @@ extern void wmInit(wm *w) {
 	
 	/* set root window */
 	w->root = DefaultRootWindow(w->disp);
+
+	/* set wm protocols */
+	_wm_delete_message = XInternAtom(w->disp, "WM_DELETE_WINDOW", False);
+	_wm_protocols = XInternAtom(w->disp, "WM_PROTOCOLS", False);
 }
 
 /* close window manager */
@@ -57,6 +85,10 @@ extern void wmClose(wm *w) {
 
 /* run window manager */
 extern void wmRun(wm *w) {
+	
+	/* atoms */
+	Atom wm_protocols = XInternAtom(w->disp, "WM_PROTOCOLS", True);
+	Atom wm_delete_message = XInternAtom(w->disp, "WM_DELETE_WINDOW", False);
 
 	/* setup so that we can exit if another wm is running already */
 	XSetErrorHandler(_wmDetected);
@@ -108,11 +140,21 @@ extern void wmRun(wm *w) {
 	/* main loop */
 	int running = 1;
 	while (running) {
-	
+				
+		/* get mouse pos */
+		Window rr, cr;
+		int wx, wy, mr;
+		XQueryPointer(w->disp, w->root, &rr, &cr, &wx, &wy, &mouse_x, &mouse_y, &mr);
+
 		/* get next event */
 		XEvent e;
 		XNextEvent(w->disp, &e);
 		
+		for (int i = 0; i < wsl; i++) {
+			XDrawLine(w->disp, ws[i].f, mgc, 6, 6, 14, 14);
+			XDrawLine(w->disp, ws[i].f, mgc, 14, 6, 6, 14);
+		}
+
 		/* window is created */
 		if (e.type == CreateNotify) {
 		
@@ -141,6 +183,74 @@ extern void wmRun(wm *w) {
 		
 			_wmUnmapNotify(w, &e.xunmap);
 		}
+		/* mouse is moved, pressed, etc */
+		else if (e.type == ButtonPress) {
+
+			/* check if window is in list */
+			int i;
+			for (i = 0; i < wsl; i++)
+				if (ws[i].f == e.xbutton.window)
+					break;
+			
+			if (i < wsl) {
+			
+				/* raise window to top */
+				XRaiseWindow(w->disp, ws[i].f);
+				
+				/* set input focus to window */
+				XSetInputFocus(w->disp, ws[i].f, RevertToParent, CurrentTime);
+
+				/* button 1 */
+				if (e.xbutton.button == Button1) {
+					
+					_b1_pressed = 1;
+					
+					/* close window */
+					if (e.xbutton.window == ws[i].f && e.xbutton.x > 0 && e.xbutton.y > 0 && e.xbutton.x < 20 && e.xbutton.y < 20) {
+					
+						/* close window */
+						_wmCloseWindow(w, ws[i].w);
+					}
+				}
+			}
+		}
+		/* button release */
+		else if (e.type == ButtonRelease) {
+
+			/* check if window is in list */
+			int i;
+			for (i = 0; i < wsl; i++)
+				if (ws[i].w == e.xbutton.window || ws[i].f == e.xbutton.window)
+					break;
+			
+			if (i < wsl) {
+			
+				/* disable */
+				_b1_pressed = 0;
+			}
+		}
+		/* motion */
+		else if (e.type == MotionNotify) {
+		
+			/* check window */
+			int i;
+			for (i = 0; i < wsl; i++)
+				if (ws[i].f == e.xmotion.window)
+					break;
+			
+			if (i < wsl && _b1_pressed) {
+			
+				/* calculate position for window to be in */
+				XWindowAttributes xwa;
+				XGetWindowAttributes(w->disp, ws[i].f, &xwa);
+				
+				int x = xwa.x + -mouse_x + e.xmotion.x_root;
+				int y = xwa.y + -mouse_y + e.xmotion.y_root;
+				
+				/* move window */
+				XMoveWindow(w->disp, ws[i].f, x, y);
+			}
+		}
 	}
 }
 
@@ -154,7 +264,14 @@ static int _wmDetected(Display *d, XErrorEvent *e) {
 	return 0;
 }
 
-static int _wmError(Display *d, XErrorEvent *e) {}
+static int _wmError(Display *d, XErrorEvent *e) {
+
+	/* print error info */
+	char buf[4096];
+	XGetErrorText(d, e->error_code, buf, 4096);
+	
+	fprintf(stderr, "\trequest: %d\n\terror code: %d\n\terror: %s\n\tresource id: %d\n", e->request_code, e->error_code, buf, e->resourceid);
+}
 
 /* create a window */
 static void _wmCreateNotify(XCreateWindowEvent *e) {
@@ -181,8 +298,13 @@ static void _wmConfigureRequest(wm *w, XConfigureRequestEvent *e) {
 		if (ws[i].w == e->window)
 			break;
 	
-	if (i < wsl)
+	if (i < wsl) {
+		changes.height += 20;
 		XConfigureWindow(w->disp, ws[i].f, e->value_mask, &changes);
+		changes.x = 0;
+		changes.y = 20;
+		changes.height -= 20;
+	}
 	
 	/* configure window */
 	XConfigureWindow(w->disp, e->window, e->value_mask, &changes);
@@ -201,16 +323,26 @@ static void _wmMapRequest(wm *w, XMapRequestEvent *e) {
 static void _wmFrame(wm *w, Window wp, int wcbwm) {
 
 	/* visual properties for window frame */
-	unsigned int BORDER_WIDTH = 3;
+	unsigned int BORDER_WIDTH = 1;
 	unsigned long BORDER_COLOR = 0xff0000;
 	unsigned long BG_COLOR = 0xaa0000;
+
+	/* don't frame a window that is already framed */
+	for (int i = 0; i < wsl; i++) {
 	
+		/* if in list */
+		if (ws[i].w == wp || ws[i].f == wp)
+			return;
+	}
+
 	/* retrieve window attributes */
 	XWindowAttributes xw_attrs;
 	XGetWindowAttributes(w->disp, wp, &xw_attrs);
 	
 	/* if the window was created before this wm */
 	if (wcbwm && (xw_attrs.override_redirect || xw_attrs.map_state != IsViewable)) return;
+
+	printf("Creating window frame...\n");
 	
 	/* create frame */
 	Window frame = XCreateSimpleWindow(
@@ -219,7 +351,7 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 		xw_attrs.x,
 		xw_attrs.y,
 		xw_attrs.width,
-		xw_attrs.height,
+		xw_attrs.height + 20,
 		BORDER_WIDTH,
 		BORDER_COLOR,
 		BG_COLOR);
@@ -228,10 +360,14 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 	XSelectInput(
 		w->disp,
 		frame,
-		SubstructureRedirectMask | SubstructureNotifyMask);
+		SubstructureRedirectMask | SubstructureNotifyMask | ButtonPressMask | ButtonReleaseMask | ButtonMotionMask);
+	
+	printf("Adding window to save set...\n");
 	
 	/* add window to save set so that it can be restored in the event of a crash */
 	XAddToSaveSet(w->disp, wp);
+	
+	printf("Reparenting window...\n");
 	
 	/* reparent client window */
 	XReparentWindow(
@@ -240,6 +376,10 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 		frame,
 		0, 0);
 	
+	XMoveWindow(w->disp, wp, 0, 20);
+	
+	printf("Mapping window...\n");
+	
 	/* map frame */
 	XMapWindow(w->disp, frame);
 	
@@ -247,6 +387,7 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 	if (ws == NULL) {
 	
 		ws = (struct windows *)malloc(sizeof(struct windows *) * wsc);
+		atexit(wsfree);
 	}
 	
 	/* list is too small */
@@ -256,11 +397,72 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 		ws = (struct windows *)realloc(ws, sizeof(struct windows *) * wsc);
 	}
 	
-	/* add item */
-	ws[wsl++] = (struct windows){wp, frame};
+	/* draw onto frame */
+	if (mgc == NULL) mgc = XCreateGC(w->disp, frame, 0, NULL);
+	XSetForeground(w->disp, mgc, 0xaaaaaa);
+	XDrawLine(w->disp, frame, mgc, 6, 6, 14, 14);
+	XDrawLine(w->disp, frame, mgc, 14, 6, 6, 14);
 	
-	/* atexit the free function */
-	atexit(wsfree);
+	/* add item */
+	//ws[wsl++] = (struct windows){wp, frame, mgc, w->disp};
+	int i = wsl++;
+	ws[i].w = wp;
+	ws[i].f = frame;
+	//ws[i].fgc = mgc;
+	//ws[i].d = w->disp;
+	
+	printf("Focusing on window...\n");
+	
+	/* set focus of input to window frame */
+	XSetInputFocus(w->disp, frame, RevertToPointerRoot, CurrentTime);
+	
+	printf("Enabling button input on window frame...\n");
+	
+	/* left mouse button for moving windows */
+	XGrabButton(w->disp,
+		    Button1,
+		    Mod1Mask,
+		    frame,
+		    0,
+		    ButtonPressMask | ButtonReleaseMask | ButtonMotionMask,
+		    GrabModeAsync,
+		    GrabModeAsync,
+		    None,
+		    None);
+	
+	printf("Finished framing window.\n");
+	
+	struct hints {
+		unsigned long flags;
+		unsigned long functions;
+		unsigned long decorations;
+		long inputMode;
+		unsigned long status;
+	};
+	
+	Atom actr;
+	int acfmtr;
+	unsigned long nir;
+	unsigned long bar;
+	unsigned char *data = NULL;
+
+	/* get hints property */
+	Atom property = XInternAtom(w->disp, "_MOTIF_WM_HINTS", 0);
+	
+	int status = XGetWindowProperty(w->disp, wp, property, 0L, 20L, False, property, &actr, &acfmtr, &nir, &bar, &data);
+	
+	if (status != Success || actr == 0) {
+
+		fprintf(stderr, "Warning: failed to read Motif Window Manager Hints!\n");
+		return; /* we may need to change this line in the future... */
+	}
+	
+	struct hints *h = (struct hints *)data;
+	
+	printf("%p\n", data);
+	
+	/* free the resulting data */
+	if (data != NULL) XFree(data);
 }
 
 /* unmap a window */
@@ -276,8 +478,12 @@ static void _wmUnmapNotify(wm *w, XUnmapEvent *e) {
 	if (i >= wsl || e->event == w->root)
 		return;
 	
+	printf("Unmapping frame...\n");
+	
 	/* unmap frame */
 	XUnmapWindow(w->disp, ws[i].f);
+	
+	printf("Reparenting window...\n");
 	
 	/* reparent client window to root */
 	XReparentWindow(w->disp,
@@ -285,12 +491,57 @@ static void _wmUnmapNotify(wm *w, XUnmapEvent *e) {
 			w->root,
 			0, 0);
 	
+	printf("Removing window from save set...\n");
+	
 	/* remove window from save set */
 	XRemoveFromSaveSet(w->disp, e->window);
+	
+	/* free context */
+	//XFreeGC(w->disp, ws[i].fgc);
+	
+	printf("Destroying window...\n");
 	
 	/* destroy window */
 	XDestroyWindow(w->disp, ws[i].w);
 	
 	/* remove reference from list */
 	memcpy((void *)&ws[i], (void *)&ws[i+1], ((wsl--) - i - 1) * sizeof(struct windows));
+}
+
+/* close a window */
+static void _wmCloseWindow(wm *w, Window wp) {
+
+	/* get protocols */
+	Atom *sprot; /* supported protocols */
+	int nsprot; /* number of supported protocols */
+	XGetWMProtocols(w->disp, wp, &sprot, &nsprot);
+	
+	int i;
+	for (i = 0; i < nsprot; i++) {
+
+		if (sprot[i] == _wm_delete_message) break;
+	}
+	
+	/* send message */
+	if (i < nsprot) {
+
+		printf("Closing window...\n");
+
+		XEvent msg;
+		memset(&msg, 0, sizeof(msg));
+		msg.xclient.type = ClientMessage; /* send a message */
+		msg.xclient.message_type = _wm_protocols; /* send a protocol message */
+		msg.xclient.window = wp; /* the primary window */
+		msg.xclient.format = 32;
+		msg.xclient.data.l[0] = _wm_delete_message; /* tell it that we want to delete the window */
+		XSendEvent(w->disp, wp, false, 0, &msg); /* send event */
+	}
+	
+	/* kill the window */
+	else {
+
+		printf("Killing window...\n");
+		
+		XKillClient(w->disp, wp);
+	}
 }
