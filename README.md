@@ -1,5 +1,5 @@
 # pwm
-Pixel's Window Manager. I want to do something different yet again. This is mainly going to be a clone of [https://github.com/joewing/jwm](JWM), but it also contains code from the tutorial series which can be found [https://github.com/jichu4n](here).
+Pixel's Window Manager. I want to do something different yet again. This is mainly going to be a clone of [JWM](https://github.com/joewing/jwm), but it also contains code from the tutorial series that I followed which can be found [here](https://github.com/jichu4n/basic_wm).
 
 # 11-feb-2022
 I fixed some issues:
