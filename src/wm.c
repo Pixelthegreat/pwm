@@ -5,11 +5,10 @@
 #include <stdbool.h>
 #include "wm.h"
 
-/* literally just two windows */
+/* windows */
 struct windows {
-	Window w, f;
-	//GC fgc;
-	//Display *d;
+	Window w;
+	Window f;
 };
 
 /* variables and forw-decls */
@@ -24,10 +23,6 @@ static void _wmCloseWindow(wm *, Window);
 static int _wm_detected = 0;
 static int _b1_pressed = 0;
 
-static struct windows *ws = NULL;
-static int wsl = 0;
-static int wsc = 8;
-
 static int mouse_x;
 static int mouse_y;
 
@@ -36,6 +31,20 @@ static Display *_mdisp;
 
 static Atom _wm_delete_message;
 static Atom _wm_protocols;
+
+/* Motif WM Hints */
+struct hints {
+	unsigned long flags;
+	unsigned long functions;
+	unsigned long decorations;
+	long inputMode;
+	unsigned long status;
+};
+
+static struct hints *hs = NULL; /* window hints */
+static struct windows *ws = NULL; /* windows */
+static int wsl = 0; /* length of list */
+static int wsc = 0; /* capacity of list */
 
 /* free ws list */
 static void wsfree() {
@@ -46,9 +55,9 @@ static void wsfree() {
 	/* free gc's */
 	if (mgc != NULL) XFreeGC(_mdisp, mgc);
 	
-	/* free list */
-	free(ws);
-	ws = NULL;
+	/* free lists */
+	if (ws != NULL) { free(ws); ws = NULL; }
+	if (hs != NULL) { free(hs); hs = NULL; }
 }
 
 /* intialise window manager */
@@ -299,15 +308,23 @@ static void _wmConfigureRequest(wm *w, XConfigureRequestEvent *e) {
 			break;
 	
 	if (i < wsl) {
-		changes.height += 20;
-		XConfigureWindow(w->disp, ws[i].f, e->value_mask, &changes);
-		changes.x = 0;
-		changes.y = 20;
-		changes.height -= 20;
+		if (hs[i].decorations) {
+			changes.height += 20;
+			XConfigureWindow(w->disp, ws[i].f, e->value_mask, &changes);
+			changes.x = 0;
+			changes.y = 20;
+			changes.height -= 20;
+		} else {
+			XConfigureWindow(w->disp, ws[i].f, e->value_mask, &changes);
+			changes.x = 0;
+			changes.y = 0;
+		}
 	}
 	
 	/* configure window */
 	XConfigureWindow(w->disp, e->window, e->value_mask, &changes);
+
+	printf("Configured window.\n");
 }
 
 /* map a window */
@@ -386,14 +403,18 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 	/* create ws list if it hasn't been created */
 	if (ws == NULL) {
 	
+		wsc = 8;
 		ws = (struct windows *)malloc(sizeof(struct windows *) * wsc);
+		hs = (struct hints *)malloc(sizeof(struct hints *) * wsc);
 		atexit(wsfree);
 	}
+	//ws = (ws == NULL)? (struct windows *)malloc(sizeof(struct windows *) * wsc): ws;
 	
 	/* list is too small */
 	if (wsl >= wsc) {
 	
 		wsc *= 2;
+		hs = (struct hints *)realloc(hs, sizeof(struct hints *) * wsc);
 		ws = (struct windows *)realloc(ws, sizeof(struct windows *) * wsc);
 	}
 	
@@ -406,6 +427,7 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 	/* add item */
 	//ws[wsl++] = (struct windows){wp, frame, mgc, w->disp};
 	int i = wsl++;
+
 	ws[i].w = wp;
 	ws[i].f = frame;
 	//ws[i].fgc = mgc;
@@ -432,26 +454,22 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 	
 	printf("Finished framing window.\n");
 	
-	struct hints {
-		unsigned long flags;
-		unsigned long functions;
-		unsigned long decorations;
-		long inputMode;
-		unsigned long status;
-	};
-	
-	Atom actr;
-	int acfmtr;
-	unsigned long nir;
-	unsigned long bar;
+	Atom actr = 0;
+	int acfmtr = 0;
+	unsigned long nir = 0;
+	unsigned long bar = 0;
 	unsigned char *data = NULL;
 
 	/* get hints property */
 	Atom property = XInternAtom(w->disp, "_MOTIF_WM_HINTS", 0);
 	
-	int status = XGetWindowProperty(w->disp, wp, property, 0L, 20L, False, property, &actr, &acfmtr, &nir, &bar, &data);
+	int status = XGetWindowProperty(w->disp, wp, property, 0L, sizeof(struct hints), False, property, &actr, &acfmtr, &nir, &bar, &data);
 	
-	if (status != Success || actr == 0) {
+	if (status != Success || actr == 0 || data == NULL) {
+
+		/* set to defaults */
+		memset(&hs[i], 0, sizeof(struct hints));
+		hs[i].decorations = 1;
 
 		fprintf(stderr, "Warning: failed to read Motif Window Manager Hints!\n");
 		return; /* we may need to change this line in the future... */
@@ -459,10 +477,23 @@ static void _wmFrame(wm *w, Window wp, int wcbwm) {
 	
 	struct hints *h = (struct hints *)data;
 	
-	printf("%p\n", data);
+	/* copy hints data to hs */
+	hs[i].decorations = h->decorations;
 	
 	/* free the resulting data */
 	if (data != NULL) XFree(data);
+	
+	if (!hs[i].decorations) {
+		
+		/* disable border */
+		XWindowChanges xwa;
+		
+		xwa.border_width = 0;
+		xwa.height = xw_attrs.height;
+		XMoveWindow(w->disp, wp, 0, 0);
+		
+		XConfigureWindow(w->disp, frame, CWBorderWidth | CWHeight, &xwa);
+	}
 }
 
 /* unmap a window */
@@ -506,6 +537,7 @@ static void _wmUnmapNotify(wm *w, XUnmapEvent *e) {
 	
 	/* remove reference from list */
 	memcpy((void *)&ws[i], (void *)&ws[i+1], ((wsl--) - i - 1) * sizeof(struct windows));
+	memcpy((void *)&hs[i], (void *)&hs[i+1], ((wsl+1) - i - 1) * sizeof(struct hints));
 }
 
 /* close a window */
